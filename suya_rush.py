@@ -1,22 +1,35 @@
 """
 SUYA RUSH - A Nigerian Street-Food Restaurant Simulation Game
-==============================================================
-A fast-paced cooking and time-management game built with Pygame.
+A fast-paced cooking and time-management game built with Pygame where players
+manage a suya (grilled meat) stand, serving customers before their patience runs out.
 
-Project Structure:
-- main.py: Entry point and Game class
-- customer.py: Customer system with patience and orders
-- grill.py: Suya cooking system
-- order.py: Order management
-- ui_manager.py: UI rendering and menus
-- assets/: Placeholder for images and sounds (game works without them)
+Architecture Overview:
+The game is organized into several cohesive modules that handle distinct responsibilities:
 
-Author: Generated for Suya Rush Project
+- main.py (this file): Contains the main entry point, the central Game class that
+  orchestrates all systems, and all game constants, enums, utility functions, and
+  supporting classes. This is the monolithic single-file implementation.
+
+- customer.py (conceptual): The Customer class manages individual customer behavior
+  including their visual appearance, patience timer, order quantity, entrance/exit
+  animations, speech bubbles for orders, and satisfaction feedback.
+
+- grill.py (conceptual): The Grill and SuyaStick classes handle the cooking mechanics,
+  tracking cook progress, burn states, slot management, and visual representation of
+  meat on the grill with progress indicators.
+
+- order.py (conceptual): The OrderManager class controls customer spawning logic,
+  queue management, level-based difficulty scaling, and the serving interaction that
+  validates correct order quantities against available cooked suya.
+
+- ui_manager.py (conceptual): The UIManager class renders all screen states including
+  the main menu, instructions, shop/upgrades, in-game HUD, pause overlay, and game
+  over screen. It also handles button creation, hover states, and click detection.
+
+- assets/ (placeholder directory): Reserved for external image and audio resources.
+  The game is fully functional using only programmatically drawn shapes and colors,
+  so no external assets are strictly required.
 """
-
-# ============================================================
-# CONSTANTS AND CONFIGURATION
-# ============================================================
 
 import pygame
 import random
@@ -76,9 +89,6 @@ COMBO_BONUS = [0, 0, 20, 50, 100, 200]  # bonus at combo levels
 SPECIAL_CUSTOMER_CHANCE = 0.15
 SPECIAL_MULTIPLIER = 2.0
 
-# ============================================================
-# ENUMS
-# ============================================================
 
 class GameState(Enum):
     MENU = "menu"
@@ -100,16 +110,33 @@ class CustomerState(Enum):
     ANGRY = "angry"
     LEAVING = "leaving"
 
-# ============================================================
 # UTILITY FUNCTIONS
-# ============================================================
+#
+# Standalone helper functions that are used across multiple classes.
+# These handle common rendering tasks (rounded rectangles, shadowed text),
+# and persistent data operations (loading and saving high-score records
+# to a local JSON file). Keeping these as module-level functions avoids
+# code duplication and keeps class definitions focused on their primary responsibilities.
+#
 
 def draw_rounded_rect(surface, color, rect, radius=10):
-    """Draw a rounded rectangle."""
+    """Render a rectangle with rounded corners on the given surface.
+    
+    Wraps pygame.draw.rect with the border_radius parameter to provide a
+    consistent visual style for UI panels, buttons, and game objects throughout
+    the interface. The radius parameter controls the curvature of the corners.
+    """
     pygame.draw.rect(surface, color, rect, border_radius=radius)
 
 def draw_text(surface, text, font, color, pos, center=True, shadow=True):
-    """Draw text with optional shadow."""
+    """Render text onto a surface with an optional drop shadow for readability.
+    
+    When shadow is enabled, a black offset copy of the text is drawn first,
+    creating depth that helps text stand out against busy backgrounds. The
+    center flag determines whether pos is treated as the center point or the
+    top-left corner of the text bounding box. Returns the text's Rect for
+    potential collision or positioning calculations by the caller.
+    """
     if shadow:
         shadow_surf = font.render(text, True, (0, 0, 0))
         offset = 2
@@ -128,7 +155,12 @@ def draw_text(surface, text, font, color, pos, center=True, shadow=True):
     return text_rect
 
 def load_high_scores() -> List[Dict]:
-    """Load high scores from file."""
+    """Retrieve the persisted high-score leaderboard from local disk.
+    
+    Attempts to open and parse high_scores.json. If the file does not exist,
+    is empty, or contains malformed JSON, returns an empty list rather than
+    crashing, ensuring the game can always present a fresh leaderboard.
+    """
     try:
         with open('high_scores.json', 'r') as f:
             return json.load(f)
@@ -136,13 +168,24 @@ def load_high_scores() -> List[Dict]:
         return []
 
 def save_high_scores(scores: List[Dict]):
-    """Save high scores to file."""
+    """Persist the current high-score leaderboard to local disk.
+    
+    Serializes the provided list of score dictionaries into JSON format and
+    writes them to high_scores.json. This is called whenever a game ends and
+    the player's result needs to be recorded for future sessions.
+    """
     with open('high_scores.json', 'w') as f:
         json.dump(scores, f)
 
-# ============================================================
 # SUYA STICK CLASS
-# ============================================================
+#
+# Represents a single piece of suya meat mounted on a skewer stick and placed
+# on a specific grill slot. Each instance independently tracks its own cooking
+# state (raw -> cooking -> cooked -> burned), elapsed cook and burn timers,
+# visual position on screen, and whether it is currently selected by the player.
+# The class encapsulates all per-stick logic including state transitions,
+# color interpolation during cooking, and self-rendering.
+#
 
 class SuyaStick:
     """Represents a single stick of suya on the grill."""
@@ -159,7 +202,14 @@ class SuyaStick:
         self.selected = False
 
     def update(self, dt: float, cook_speed: float = 1.0):
-        """Update suya cooking state."""
+        """Advance the cooking simulation for this suya stick by one frame.
+        
+        If the stick is in the COOKING state, increments the cook_timer by the
+        elapsed delta time scaled by cook_speed. Once cook_timer reaches COOK_TIME,
+        the state transitions to COOKED. Independently, the burn_timer increments
+        whenever the stick is COOKING or COOKED; reaching BURN_TIME transitions
+        the state to BURNED, making the stick inedible until discarded.
+        """
         if self.state == SuyaState.COOKING:
             self.cook_timer += dt * cook_speed
             if self.cook_timer >= COOK_TIME:
@@ -172,27 +222,51 @@ class SuyaStick:
                 self.state = SuyaState.BURNED
 
     def start_cooking(self):
-        """Place suya on grill to start cooking."""
+        """Initiate the cooking process for this suya stick.
+        
+        Only has an effect when the stick is in the RAW state, transitioning
+        it to COOKING. This is typically called immediately after the stick is
+        placed on the grill so that it begins progressing toward the cooked state.
+        """
         if self.state == SuyaState.RAW:
             self.state = SuyaState.COOKING
 
     def is_ready(self) -> bool:
-        """Check if suya is cooked and ready to serve."""
+        """Determine whether this suya stick has reached the perfectly cooked state.
+        
+        Returns True only if the internal state equals COOKED, indicating the stick
+        is safe to remove from the grill and serve to a customer.
+        """
         return self.state == SuyaState.COOKED
 
     def is_burned(self) -> bool:
-        """Check if suya is burned."""
+        """Determine whether this suya stick has been left on the grill too long.
+        
+        Returns True only if the internal state equals BURNED, meaning the stick
+        is ruined, cannot be served, and should be discarded to free the grill slot.
+        """
         return self.state == SuyaState.BURNED
 
     def discard(self):
-        """Reset suya to raw state (discarded/burned)."""
+        """Clear this grill slot by resetting the suya stick to its initial RAW state.
+        
+        Zeros out all timers and clears the selection flag, effectively making the
+        slot empty and ready to receive a new piece of suya. Called when the player
+        manually discards burned meat or when the game auto-clears burned sticks.
+        """
         self.state = SuyaState.RAW
         self.cook_timer = 0.0
         self.burn_timer = 0.0
         self.selected = False
 
     def draw(self, surface):
-        """Draw the suya stick on the grill."""
+        """Render this suya stick and all its associated visual indicators.
+        
+        Draws the meat rectangle with color interpolated between raw and cooked
+        during the cooking phase, the metal skewer line through the center, a gold
+        selection border if selected, a green progress bar above the stick while
+        cooking, and a red BURNED label when overcooked.
+        """
         # Draw stick
         stick_color = COLORS['suya_raw']
         if self.state == SuyaState.COOKING:
@@ -234,9 +308,16 @@ class SuyaStick:
             draw_text(surface, "BURNED", pygame.font.SysFont('Arial', 14), 
                      COLORS['text_red'], (self.x + self.width//2, self.y - 15))
 
-# ============================================================
 # GRILL CLASS
-# ============================================================
+#
+# Manages the entire cooking station as a collection of discrete slots, each
+# capable of holding one SuyaStick. The Grill class is responsible for adding
+# new suya to empty slots, querying how many sticks are ready to serve,
+# removing cooked sticks when orders are fulfilled, clearing burned sticks,
+# and applying global cook-speed modifiers from upgrades. It also renders the
+# grill chassis, animated flame effects beneath the grates, and delegates
+# drawing of individual suya sticks to their respective instances.
+#
 
 class Grill:
     """Manages the suya grill with multiple cooking slots."""
@@ -254,7 +335,12 @@ class Grill:
         self.height = 120
 
     def add_suya(self) -> bool:
-        """Add a new suya stick to an empty slot. Returns success."""
+        """Place a new raw suya stick onto the first available grill slot.
+        
+        Iterates through all slots in order; upon finding an empty one, instantiates
+        a new SuyaStick, immediately starts its cooking timer, and returns True.
+        If every slot is occupied, returns False so the caller knows the action failed.
+        """
         for i in range(self.num_slots):
             if self.slots[i] is None:
                 self.slots[i] = SuyaStick(i)
@@ -263,11 +349,22 @@ class Grill:
         return False
 
     def get_ready_suya(self) -> int:
-        """Count how many suya sticks are cooked and ready."""
+        """Count the number of suya sticks currently in the COOKED state.
+        
+        This value is displayed in the HUD and is checked before allowing the
+        player to serve an order, ensuring they cannot promise more suya than
+        is actually available on the grill.
+        """
         return sum(1 for s in self.slots if s is not None and s.is_ready())
 
     def take_suya(self, quantity: int) -> int:
-        """Take cooked suya from grill. Returns actual amount taken."""
+        """Remove up to the requested number of cooked suya sticks from the grill.
+        
+        Scans slots left-to-right, removing COOKED sticks until either the requested
+        quantity is met or no more cooked sticks remain. Returns the actual count
+        removed, which the caller compares against the requested quantity to verify
+        sufficient supply before completing a serve action.
+        """
         taken = 0
         for i in range(self.num_slots):
             if taken >= quantity:
@@ -278,19 +375,34 @@ class Grill:
         return taken
 
     def discard_burned(self):
-        """Remove all burned suya from grill."""
+        """Clear every grill slot that contains a burned suya stick.
+        
+        Iterates through all slots and sets any BURNED stick to None, freeing
+        those slots for new meat. This is triggered by the player clicking the
+        DISCARD button or pressing the D key.
+        """
         for i in range(self.num_slots):
             if self.slots[i] is not None and self.slots[i].is_burned():
                 self.slots[i] = None
 
     def update(self, dt: float):
-        """Update all suya on grill."""
+        """Advance the cooking simulation for every occupied grill slot.
+        
+        Delegates to each SuyaStick's own update method, passing the frame delta
+        time and the global cook_speed multiplier so that upgrade effects apply
+        uniformly across all sticks currently on the grill.
+        """
         for slot in self.slots:
             if slot is not None:
                 slot.update(dt, self.cook_speed)
 
     def draw(self, surface):
-        """Draw the grill and all suya on it."""
+        """Render the complete grill assembly including base, grates, flames, and suya.
+        
+        Draws the metal grill body with rounded corners, vertical grate lines,
+        animated flickering fire ellipses beneath the cooking surface, delegates
+        individual suya rendering to each SuyaStick, and finally draws the GRILL label.
+        """
         # Draw grill base
         grill_rect = pygame.Rect(self.x, self.y, self.width, self.height)
         draw_rounded_rect(surface, COLORS['grill_metal'], grill_rect, 10)
@@ -319,9 +431,16 @@ class Grill:
         draw_text(surface, "GRILL", font, COLORS['text_white'], 
                  (self.x + self.width//2, self.y - 20))
 
-# ============================================================
 # CUSTOMER CLASS
-# ============================================================
+#
+# Models an individual customer who enters from the left, waits in queue,
+# displays an order via a speech bubble, and eventually leaves either satisfied
+# or angry. Each customer has randomized visual attributes (skin tone, shirt color,
+# hairstyle), a procedurally generated order size that scales with game level,
+# a patience timer that drains while waiting, and a special-customer flag that
+# doubles rewards. The class handles all its own animation (entrance sliding,
+# idle bouncing, angry arm raising, exit sliding), rendering, and feedback text.
+#
 
 class Customer:
     """Represents a customer with order and patience."""
@@ -364,7 +483,13 @@ class Customer:
         self.feedback_color = COLORS['text_white']
 
     def update(self, dt: float):
-        """Update customer state."""
+        """Advance this customer's animation, patience, and state machine by one frame.
+        
+        Handles four concurrent behaviors: (1) entrance sliding from off-screen left
+        to the target queue position, (2) patience depletion while WAITING that
+        transitions to ANGRY at zero, (3) exit sliding when SERVED or ANGRY,
+        (4) a subtle bounce animation while idle in queue, and (5) feedback text fade-out.
+        """
         # Entrance animation
         if not self.arrived:
             self.x += 300 * dt
@@ -393,7 +518,14 @@ class Customer:
             self.feedback_timer -= dt
 
     def serve(self, quantity: int) -> bool:
-        """Attempt to serve customer. Returns True if correct order."""
+        """Validate a serving attempt against this customer's order.
+        
+        Compares the provided quantity with the customer's requested order_quantity.
+        On a match, transitions the customer to SERVED, displays a positive YUM!
+        feedback, and returns True. On a mismatch, displays a negative WRONG! feedback,
+        applies a 3-second patience penalty, and returns False so the main game loop
+        can handle the mistake consequences (combo break, life loss).
+        """
         if quantity == self.order_quantity:
             self.state = CustomerState.SERVED
             self.feedback_text = "YUM!"
@@ -408,14 +540,24 @@ class Customer:
             return False
 
     def get_money(self) -> int:
-        """Calculate money earned from this customer."""
+        """Compute the monetary reward for successfully serving this customer.
+        
+        Base earnings equal order_quantity multiplied by MONEY_PER_SUYA.
+        If this customer is a special customer (marked with a gold star), the
+        base amount is doubled via SPECIAL_MULTIPLIER before returning.
+        """
         base = self.order_quantity * MONEY_PER_SUYA
         if self.is_special:
             base = int(base * SPECIAL_MULTIPLIER)
         return base
 
     def get_score(self) -> int:
-        """Calculate score from this customer."""
+        """Compute the total score contribution for successfully serving this customer.
+        
+        Base score is order_quantity times 100, doubled for special customers.
+        An additional patience bonus of up to 50 points is awarded based on
+        the ratio of remaining patience to maximum patience, incentivizing quick service.
+        """
         base = self.order_quantity * 100
         if self.is_special:
             base = int(base * SPECIAL_MULTIPLIER)
@@ -424,11 +566,23 @@ class Customer:
         return base + patience_bonus
 
     def is_off_screen(self) -> bool:
-        """Check if customer has left the screen."""
+        """Determine whether this customer has animated fully off the visible screen area.
+        
+        Returns True if the customer's x position is beyond the left or right
+        boundaries (with a 150-pixel buffer), signaling the OrderManager to remove
+        this instance from the active customer list and free up queue space.
+        """
         return self.x < -150 or self.x > SCREEN_WIDTH + 150
 
     def draw(self, surface):
-        """Draw the customer character."""
+        """Render the complete customer avatar and all associated UI overlays.
+        
+        Composes the character from primitive shapes: rounded shirt body, skin-toned
+        head with animated eyes (angry slant when upset), mouth expression (smile,
+        frown, or neutral), hairstyle variation (short hair, cap, or turban), arms
+        positioned by emotional state, speech bubble with order details, patience
+        meter, special-customer star, and floating feedback text.
+        """
         y_pos = self.y + self.bounce_offset
 
         # Body (shirt)
@@ -514,7 +668,13 @@ class Customer:
                      (self.x + 40, y_pos - 60))
 
     def _draw_speech_bubble(self, surface, y_pos):
-        """Draw speech bubble with order."""
+        """Render a speech bubble to the right of the customer displaying their order.
+        
+        Draws a white rounded rectangle with a triangular tail pointing at the customer,
+        a black border, the order text (e.g., "Suya x2"), and a SPECIAL! label in gold
+        if this customer carries the special-customer flag. The y_pos parameter accounts
+        for the idle bounce animation so the bubble tracks the customer vertically.
+        """
         bubble_x = self.x + 90
         bubble_y = y_pos - 20
         bubble_w = 100
@@ -540,7 +700,13 @@ class Customer:
                      (bubble_x + bubble_w//2, bubble_y + 50))
 
     def _draw_patience_bar(self, surface, y_pos):
-        """Draw patience meter above customer."""
+        """Render a horizontal patience gauge above the customer's head.
+        
+        Displays a gray background bar and a colored fill bar whose width shrinks
+        as patience decreases. Color transitions from green (above 50%) to yellow
+        (25-50%) to red (below 25%), giving the player an immediate visual warning
+        of impending customer anger.
+        """
         bar_x = self.x + 10
         bar_y = y_pos - 15
         bar_w = 60
@@ -563,9 +729,15 @@ class Customer:
         if fill_w > 0:
             pygame.draw.rect(surface, color, (bar_x, bar_y, fill_w, bar_h))
 
-# ============================================================
 # ORDER MANAGER
-# ============================================================
+#
+# Acts as the central queue and spawning controller for all customers.
+# It maintains the live list of Customer instances, periodically spawns new
+# customers based on a level-adjusted interval (faster spawns at higher levels),
+# cleans up customers who have moved off-screen, and mediates the serving
+# interaction between the player and the first waiting customer in line.
+# It also aggregates statistics such as counting angry customers for life-loss calculations.
+#
 
 class OrderManager:
     """Manages customer queue and orders."""
@@ -578,7 +750,13 @@ class OrderManager:
         self.max_customers = 5
 
     def update(self, dt: float, level: int):
-        """Update customer queue and spawn new customers."""
+        """Advance the entire customer ecosystem by one frame.
+        
+        Updates all existing customers (animations, patience, state changes), removes
+        any that have fully exited the screen, and spawns a new customer if the spawn
+        timer exceeds the level-adjusted interval and the queue is not at max capacity.
+        Higher levels reduce the spawn interval, increasing pressure on the player.
+        """
         # Update existing customers
         for customer in self.customers:
             customer.update(dt)
@@ -597,16 +775,32 @@ class OrderManager:
             self.customers.append(new_customer)
 
     def get_waiting_customers(self) -> List[Customer]:
-        """Get customers still waiting to be served."""
+        """Filter the customer list to return only those currently in the WAITING state.
+        
+        A customer must have both state WAITING and arrived True (finished entrance
+        animation) to be considered truly waiting. This list drives the serving logic
+        and determines which customer receives the next order fulfillment.
+        """
         return [c for c in self.customers if c.state == CustomerState.WAITING and c.arrived]
 
     def get_first_waiting(self) -> Optional[Customer]:
-        """Get the first customer in line who is waiting."""
+        """Retrieve the next customer eligible to receive a served order.
+        
+        Returns the first element from get_waiting_customers(), which respects
+        spawn order (left-to-right queue). Returns None if no customers are currently
+        waiting, preventing invalid serve actions when the queue is empty.
+        """
         waiting = self.get_waiting_customers()
         return waiting[0] if waiting else None
 
     def serve_customer(self, quantity: int) -> Tuple[bool, int, int, bool]:
-        """Serve the first waiting customer. Returns (success, score, money, is_special)."""
+        """Attempt to fulfill the first waiting customer's order with the given quantity.
+        
+        Delegates validation to the Customer's serve() method. On success, extracts
+        and returns the score, money, and special-customer flag from that customer.
+        On failure (wrong quantity), returns a -50 score penalty, zero money, and False.
+        This tuple is unpacked by the main Game.serve_order() method to apply results.
+        """
         customer = self.get_first_waiting()
         if customer is None:
             return False, 0, 0, False
@@ -621,17 +815,31 @@ class OrderManager:
             return False, -50, 0, False
 
     def get_angry_customers(self) -> int:
-        """Count customers who left angry."""
+        """Count how many customers are currently in the ANGRY state and still visible.
+        
+        Only counts angry customers whose x position is still within the screen bounds,
+        ensuring each angry departure is processed exactly once for life-loss calculation
+        before the customer is cleaned up by the off-screen removal logic.
+        """
         return sum(1 for c in self.customers if c.state == CustomerState.ANGRY and c.x > -150)
 
     def draw(self, surface):
-        """Draw all customers."""
+        """Render every active customer in the queue.
+        
+        Simply iterates over the customer list and delegates to each Customer's
+        own draw method, preserving their relative layering in spawn order.
+        """
         for customer in self.customers:
             customer.draw(surface)
 
-# ============================================================
 # PARTICLE SYSTEM
-# ============================================================
+#
+# Provides lightweight visual feedback through programmatically generated particles.
+# Individual Particle instances track position, velocity, color, size, and remaining lifetime,
+# applying simple gravity and fade-out for a polished effect. The ParticleSystem
+# container manages spawning batches for different events (success, failure, grill smoke),
+# updates all active particles each frame, and culls dead ones to maintain performance.
+#
 
 class Particle:
     """Simple particle for visual effects."""
@@ -669,7 +877,13 @@ class ParticleSystem:
 
     def spawn(self, x: float, y: float, color: Tuple[int, int, int], 
               count: int = 10, speed: float = 100):
-        """Spawn particles at position."""
+        """Generate a burst of particles at the specified screen coordinates.
+        
+        Creates count particles with randomized velocities radiating outward from
+        the spawn point. Horizontal velocity is bidirectional and varied; vertical
+        velocity is always upward (negative) with random magnitude. Each particle
+        gets a random lifetime for natural variation in the burst pattern.
+        """
         for _ in range(count):
             angle = random.uniform(0, 6.28)
             vel = random.uniform(speed * 0.5, speed)
@@ -679,16 +893,31 @@ class ParticleSystem:
             self.particles.append(Particle(x, y, color, (vx, vy), lifetime))
 
     def spawn_success(self, x: float, y: float):
-        """Spawn success effect."""
+        """Create a celebratory particle burst for a correct order serve.
+        
+        Emits green particles (patience color) and gold particles (score color)
+        at the specified location with slightly different speeds for a layered,
+        festive explosion that rewards the player visually.
+        """
         self.spawn(x, y, COLORS['patience_green'], 15, 150)
         self.spawn(x, y, COLORS['text_gold'], 8, 100)
 
     def spawn_fail(self, x: float, y: float):
-        """Spawn failure effect."""
+        """Create a punitive particle burst for a wrong order or missed serve.
+        
+        Emits red particles at the specified location to give immediate visual
+        feedback that the player made an error, reinforcing the negative outcome
+        alongside the score penalty and combo break.
+        """
         self.spawn(x, y, COLORS['text_red'], 12, 120)
 
     def spawn_smoke(self, x: float, y: float):
-        """Spawn smoke from grill."""
+        """Create a single drifting smoke particle from the grill area.
+        
+        Generates a gray particle with slight horizontal drift and upward velocity,
+        simulating the aromatic smoke rising from a real suya grill. Randomized
+        position offset and size variation make the effect look organic rather than mechanical.
+        """
         self.particles.append(Particle(
             x + random.randint(-20, 20), y,
             (100, 100, 100),
@@ -706,9 +935,15 @@ class ParticleSystem:
         for p in self.particles:
             p.draw(surface)
 
-# ============================================================
 # UI MANAGER
-# ============================================================
+#
+# Centralizes every aspect of the user interface that does not belong to a specific
+# gameplay object. This includes initializing a font registry for consistent typography,
+# defining reusable button structures with hover and pressed visual states, and
+# implementing dedicated draw methods for every screen in the game: main menu,
+# instructions, upgrade shop, in-game HUD, pause overlay, and game-over screen.
+# It also handles dynamic button lists that change based on the current game state.
+#
 
 class UIManager:
     """Handles all UI rendering and input."""
@@ -727,7 +962,13 @@ class UIManager:
 
     def create_button(self, rect: pygame.Rect, text: str, action: str, 
                      color_key: str = 'button_normal') -> Dict:
-        """Create a button definition."""
+        """Construct a dictionary representing an interactive UI button.
+        
+        Packages the button's screen rectangle, display text, action identifier
+        (used by the event handler to determine what happens when clicked), and
+        three color states (normal, hover, pressed) into a single structure.
+        This dictionary is appended to self.buttons and consumed by draw_button().
+        """
         button = {
             'rect': rect,
             'text': text,
@@ -739,7 +980,12 @@ class UIManager:
         return button
 
     def draw_button(self, surface, button, is_hovered=False, is_pressed=False):
-        """Draw a single button."""
+        """Render one button with appropriate visual state onto the surface.
+        
+        Selects the background color based on interaction state (pressed takes
+        precedence over hover over normal), draws a rounded rectangle, adds a
+        black outline for definition, and centers the button text within the rect.
+        """
         if is_pressed:
             color = button['pressed_color']
         elif is_hovered:
@@ -755,7 +1001,13 @@ class UIManager:
                  button['rect'].center)
 
     def draw_main_menu(self, surface, high_scores: List[Dict]):
-        """Draw the main menu screen."""
+        """Render the game's title screen with navigation and leaderboard.
+        
+        Fills the background with the dark theme color, draws the game title
+        and subtitle, adds decorative orange circles, creates and positions
+        four interactive buttons (START GAME, INSTRUCTIONS, SHOP / UPGRADES, EXIT),
+        and displays the top 5 high scores with player names and score values.
+        """
         # Background
         surface.fill(COLORS['bg_dark'])
 
@@ -796,7 +1048,13 @@ class UIManager:
                 y += 25
 
     def draw_instructions(self, surface):
-        """Draw instructions screen."""
+        """Render the tutorial screen explaining game mechanics and controls.
+        
+        Displays a dark background with the HOW TO PLAY header, followed by
+        numbered gameplay steps, a KEYBOARD SHORTCUTS section highlighting
+        hotkeys for efficient play, and notes on special customers and combos.
+        A BACK button at the bottom returns the player to the main menu.
+        """
         surface.fill(COLORS['bg_dark'])
 
         draw_text(surface, "HOW TO PLAY", self.fonts['title'], COLORS['text_gold'],
@@ -844,7 +1102,13 @@ class UIManager:
             self.draw_button(surface, button, is_hovered)
 
     def draw_shop(self, surface, money: int, upgrades: Dict):
-        """Draw the shop/upgrade screen."""
+        """Render the upgrade shop where players spend earned money on permanent improvements.
+        
+        Shows the player's current money balance and lists four upgrade categories:
+        Faster Grill, More Patience, Extra Grill Slot, and Higher Profits. Each item
+        displays its name, description, current level, and purchase cost. Buttons
+        are visually disabled (grayed out) when the player cannot afford the upgrade.
+        """
         surface.fill(COLORS['bg_dark'])
 
         draw_text(surface, "SUYA STAND UPGRADES", self.fonts['title'], COLORS['text_gold'],
@@ -907,7 +1171,13 @@ class UIManager:
 
     def draw_game_hud(self, surface, score: int, money: int, combo: int, 
                      level: int, lives: int):
-        """Draw in-game HUD."""
+        """Render the persistent heads-up display overlaid during gameplay.
+        
+        Draws a semi-transparent top panel containing the current score in gold,
+        money balance in green with the Nigerian Naira symbol, current level,
+        satisfaction lives as five circles (filled red for remaining, gray for lost),
+        and a prominent combo counter with bonus point annotations when active.
+        """
         # Top panel
         panel_rect = pygame.Rect(0, 0, SCREEN_WIDTH, 70)
         s = pygame.Surface((SCREEN_WIDTH, 70), pygame.SRCALPHA)
@@ -944,7 +1214,13 @@ class UIManager:
                          COLORS['patience_green'], (SCREEN_WIDTH//2, 150))
 
     def draw_game_controls(self, surface, grill: Grill):
-        """Draw game control buttons."""
+        """Render the interactive control panel for cooking and serving actions.
+        
+        Creates the ADD SUYA and DISCARD buttons on the left, serve-quantity
+        buttons (1-4) on the right, and displays a real-time count of how many
+        suya sticks are cooked and ready out of the total available grill slots.
+        All buttons support mouse hover highlighting.
+        """
         self.buttons = []
 
         # Add Suya button
@@ -973,7 +1249,12 @@ class UIManager:
             self.draw_button(surface, button, is_hovered)
 
     def draw_pause(self, surface):
-        """Draw pause overlay."""
+        """Render a dimming overlay and pause message when the game is paused.
+        
+        Covers the entire screen with a semi-transparent black rectangle to mute
+        background visuals, then displays PAUSED in large white text and a
+        reminder to press P to resume in smaller gold text.
+        """
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 180))
         surface.blit(overlay, (0, 0))
@@ -985,7 +1266,13 @@ class UIManager:
 
     def draw_game_over(self, surface, score: int, high_score: bool, 
                       high_scores: List[Dict]):
-        """Draw game over screen."""
+        """Render the end-of-game summary screen with final statistics.
+        
+        Dims the screen with a dark overlay, shows the final score, highlights
+        NEW HIGH SCORE! if applicable, lists the top 5 scores from the leaderboard
+        (with the top entry in gold), and provides PLAY AGAIN and MAIN MENU buttons
+        for navigation.
+        """
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 200))
         surface.blit(overlay, (0, 0))
@@ -1025,7 +1312,13 @@ class UIManager:
             self.draw_button(surface, button, is_hovered)
 
     def draw_background(self, surface):
-        """Draw the game background scene."""
+        """Render the static environmental backdrop for the gameplay scene.
+        
+        Composes a Nigerian street-market atmosphere with a dark brown sky,
+        five background market stalls with triangular roofs and rectangular bodies,
+        a ground plane, the main suya stand counter made of wood tones, a lighter
+        counter-top edge, and a centered SUYA STAND sign in gold lettering.
+        """
         # Sky/background
         surface.fill(COLORS['bg_market'])
 
@@ -1058,9 +1351,17 @@ class UIManager:
         draw_text(surface, "SUYA STAND", font, COLORS['text_gold'], 
                  (SCREEN_WIDTH//2, 90))
 
-# ============================================================
 # MAIN GAME CLASS
-# ============================================================
+#
+# The core orchestrator that ties every subsystem together. It initializes Pygame,
+# creates the display window and game clock, instantiates the Grill, OrderManager,
+# ParticleSystem, and UIManager, and maintains the authoritative game state variables
+# (score, money, combo, level, lives). The Game class defines the main event loop,
+# processes all player input (keyboard shortcuts and mouse clicks), applies upgrade
+# effects to gameplay constants, enforces level progression, validates serving actions,
+# tracks daily objectives, and transitions between menu, playing, paused, and game-over states.
+# It also persists high scores to disk and handles end-of-game bookkeeping.
+#
 
 class Game:
     """Main game class that manages all game states and systems."""
@@ -1110,7 +1411,14 @@ class Game:
         self.burned_count = 0
 
     def apply_upgrades(self):
-        """Apply purchased upgrades to game systems."""
+        """Translate the player's purchased upgrade levels into modified gameplay constants.
+        
+        Each upgrade key maps to a specific mechanical change: cook_speed increases
+        the global cooking rate, patience extends customer wait times (applied during
+        Customer initialization), grill_slots expands the Grill's slot count, and
+        profits boosts money rewards at serve time. This method must be called after
+        any upgrade purchase and during game reset to ensure values are current.
+        """
         # Faster grill
         speed_bonus = 1.0 + self.upgrades['cook_speed'] * 0.25
         self.grill.cook_speed = speed_bonus
@@ -1125,7 +1433,13 @@ class Game:
         # Higher profits applied in serve logic
 
     def reset_game(self):
-        """Reset game state for new game."""
+        """Reinitialize all runtime game state to begin a fresh play session.
+        
+        Creates new instances of Grill (with upgrade-adjusted slot count), OrderManager,
+        and ParticleSystem; resets score, money, combo, level, lives, and counters;
+        reapplies all purchased upgrades; and clears objective progress. Preserves
+        the upgrade dictionary and high-score list across sessions.
+        """
         self.grill = Grill(self.grill.max_slots + self.upgrades['grill_slots'])
         self.apply_upgrades()
         self.order_manager = OrderManager()
@@ -1145,14 +1459,29 @@ class Game:
         }
 
     def check_level_up(self):
-        """Check and handle level progression."""
+        """Evaluate whether the player has met the threshold to advance to the next level.
+        
+        The requirement is total_served >= level * 8 (e.g., 8 serves for level 1,
+        16 for level 2, etc.). Upon leveling up, increments the level counter and
+        spawns a success particle burst at the screen center to celebrate the milestone.
+        Higher levels increase spawn frequency and order complexity.
+        """
         if self.total_served >= self.level * 8:
             self.level += 1
             # Level up effect
             self.particles.spawn_success(SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
 
     def serve_order(self, quantity: int):
-        """Handle serving an order."""
+        """Process a player-initiated serving action for the specified quantity.
+        
+        Validates that enough cooked suya is available on the grill; if not,
+        spawns a fail effect and aborts. Otherwise delegates to OrderManager to
+        serve the first waiting customer. On success, removes the consumed suya,
+        applies profit upgrades, increments combo and score (with combo bonus),
+        awards money, updates objectives, checks for level-up, and spawns success
+        particles. On failure, breaks combo, decrements lives, spawns fail particles,
+        and triggers game over if lives reach zero.
+        """
         ready = self.grill.get_ready_suya()
         if ready < quantity:
             # Not enough suya ready
@@ -1198,7 +1527,13 @@ class Game:
                 self.game_over()
 
     def check_objectives(self):
-        """Check and reward daily objectives."""
+        """Evaluate all active daily objectives and grant rewards for completed ones.
+        
+        Iterates through the objectives dictionary; for any objective whose current
+        progress meets or exceeds its target and is not yet marked completed,
+        flags it complete, adds the monetary reward to the player's balance,
+        and awards half the reward value as bonus score points.
+        """
         for key, obj in self.objectives.items():
             if not obj['completed'] and obj['current'] >= obj['target']:
                 obj['completed'] = True
@@ -1206,7 +1541,14 @@ class Game:
                 self.score += obj['reward'] // 2
 
     def game_over(self):
-        """Handle game over."""
+        """Transition the game to the GAME_OVER state and persist the final score.
+        
+        Compares the current score against the existing high-score list to determine
+        if this run qualifies as a new high score. Appends the result, sorts descending,
+        trims to the top 10 entries, and writes the updated leaderboard back to disk
+        via save_high_scores(). The UI will read these values when rendering the
+        game-over screen.
+        """
         self.state = GameState.GAME_OVER
 
         # Check high score
@@ -1221,7 +1563,15 @@ class Game:
         save_high_scores(self.high_scores)
 
     def handle_events(self):
-        """Process input events."""
+        """Poll and respond to all Pygame events for the current frame.
+        
+        Handles the QUIT event to stop the game loop. Processes keyboard input
+        for pause toggling (P key) and gameplay shortcuts (SPACE to add suya,
+        D to discard burned, 1-4 to serve quantities). Processes mouse clicks
+        on UI buttons across all game states, routing actions like start, restart,
+        menu navigation, cooking commands, serving commands, and upgrade purchases
+        to their respective handler logic.
+        """
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -1284,7 +1634,14 @@ class Game:
                                 self.apply_upgrades()
 
     def update(self, dt: float):
-        """Update game logic."""
+        """Advance all gameplay systems by one frame when in the PLAYING state.
+        
+        Updates the grill cooking simulation, customer queue and spawning, and
+        particle effects. Detects newly angry customers since the last frame,
+        deducts lives accordingly, breaks combo, and triggers game over if lives
+        deplete. Spawns ambient grill smoke randomly. Monitors for burned suya
+        to auto-discard them and reset the no-burn objective progress.
+        """
         if self.state != GameState.PLAYING:
             return
 
@@ -1315,7 +1672,15 @@ class Game:
                 slot.discard()
 
     def draw(self):
-        """Render the game."""
+        """Execute the complete rendering pipeline for the current game state.
+        
+        Clears the screen and delegates to the appropriate UI drawing method
+        based on state (MENU, INSTRUCTIONS, SHOP, PLAYING, PAUSED, GAME_OVER).
+        For gameplay states, renders the background scene first, then overlays
+        game objects (grill, customers, particles), the HUD, control buttons,
+        active objectives, and finally any state-specific overlays (pause dimming
+        or game-over screen). Flips the display buffer to present the frame.
+        """
         self.screen.fill(COLORS['bg_dark'])
 
         if self.state == GameState.MENU:
@@ -1361,7 +1726,13 @@ class Game:
         pygame.display.flip()
 
     def run(self):
-        """Main game loop."""
+        """Execute the primary game loop until the player exits.
+        
+        Continuously calculates delta time, processes input events, updates game
+        logic, and renders the frame at the target FPS. This method blocks until
+        self.running becomes False (via the exit button or window close), after
+        which it cleanly shuts down Pygame.
+        """
         while self.running:
             dt = self.clock.tick(FPS) / 1000.0
 
@@ -1371,9 +1742,6 @@ class Game:
 
         pygame.quit()
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     game = Game()
